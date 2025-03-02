@@ -51,7 +51,7 @@ const llm = new ChatOpenAI({
   temperature: 0.0,
 });
 
-// System message defining the Dungeon Master role
+const ALLOWED_CHANNEL_ID = process.env.ALLOWED_CHANNEL_ID; 
 const systemMessage = SystemMessagePromptTemplate.fromTemplate(`
   You are a Dungeon Master for a multiplayer text-based Dungeons & Dragons campaign.
   - Guide the players through an immersive shared adventure.
@@ -90,6 +90,8 @@ client.once("ready", () => {
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+
+  if (message.channel.id !== ALLOWED_CHANNEL_ID) return;
 
   if (message.content.startsWith("!begin")) {
     await deleteCampaignMemory();
