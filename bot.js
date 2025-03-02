@@ -1,9 +1,45 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits } = require("discord.js");
 const { ChatOpenAI } = require("@langchain/openai");
+const { Chroma } = require("@langchain/community/vectorstores/chroma");
+const { ChromaClient } = require("chromadb");
+const { OpenAIEmbeddings } = require("@langchain/openai");
 const { ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate } = require("@langchain/core/prompts");
-const { BufferMemory } = require("langchain/memory");
+const sqlite3 = require('sqlite3').verbose();
 
+// Initialize SQLite database
+const db = new sqlite3.Database('./dnd_campaign.db', (err) => {
+  if (err) {
+    console.error('Error opening database:', err.message);
+  } else {
+    console.log('Connected to the SQLite database.');
+    db.run(`CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user TEXT,
+      content TEXT,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+  }
+});
+
+const chromaClient = new ChromaClient({ path: "http://localhost:8000" }); // If running locally
+
+// Initialize OpenAI Embeddings (FIXES THE ERROR)
+const embeddings = new OpenAIEmbeddings({
+  openAIApiKey: process.env.OPENAI_API_KEY, // Make sure this is set in .env
+});
+
+// Connect Chroma vector store with embeddings
+const vectorStore = new Chroma(embeddings, {
+  collectionName: "dnd_campaign_memory",
+  client: chromaClient,
+});
+
+// Example query function
+async function searchMemory(query) {
+  const results = await vectorStore.similaritySearch(query, 3);
+  console.log(results);
+}
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
@@ -15,14 +51,7 @@ const llm = new ChatOpenAI({
   temperature: 0.0,
 });
 
-const ALLOWED_CHANNEL_ID = process.env.ALLOWED_CHANNEL_ID; // Replace with your desired channel ID
-
-// Global shared memory for all players in the same campaign
-const memory = new BufferMemory({
-  returnMessages: true, // Ensures past messages are available
-  memoryKey: "history", // The key under which the memory is stored
-});
-
+// System message defining the Dungeon Master role
 const systemMessage = SystemMessagePromptTemplate.fromTemplate(`
   You are a Dungeon Master for a multiplayer text-based Dungeons & Dragons campaign.
   - Guide the players through an immersive shared adventure.
@@ -35,9 +64,25 @@ const systemMessage = SystemMessagePromptTemplate.fromTemplate(`
 `);
 
 const prompt = ChatPromptTemplate.fromMessages([
-  systemMessage, 
+  systemMessage,
   HumanMessagePromptTemplate.fromTemplate("{input}")
 ]);
+
+// Function to fetch past messages from ChromaDB
+async function getConversationHistory() {
+  const query = 'What happened in the last session?';
+  const results = await vectorStore.similaritySearch(query, 5); // Get last 5 messages
+  return results.map((doc) => doc.pageContent).join("\n");
+}
+
+async function deleteCampaignMemory() {
+  try {
+    await chromaClient.deleteCollection({ name: "dnd_campaign" });
+    console.log("Deleted collection: dnd_campaign");
+  } catch (error) {
+    console.error("Error deleting collection:", error);
+  }
+}
 
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}!`);
@@ -46,28 +91,29 @@ client.once("ready", () => {
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
-  if (message.channel.id !== ALLOWED_CHANNEL_ID) return;
-
   if (message.content.startsWith("!begin")) {
-    await memory.clear(); // Clear memory to reset the session
+    await deleteCampaignMemory();
     message.reply("Welcome, adventurers! Your journey begins in a dark tavern. What would you like to do?");
     return;
   }
 
   try {
-    // Retrieve past messages
-    const pastMessages = await memory.loadMemoryVariables({});
+    // Fetch previous conversation history
+    const pastMessages = await getConversationHistory();
 
-    // Format prompt with memory and current user input
+    // Format prompt with history and user input
     const formattedPrompt = await prompt.format({
-      input: `${message.author.username}: ${message.content}\n\nMemory: ${JSON.stringify(pastMessages.history)}`,
+      input: `${message.author.username}: ${message.content}\n\nMemory: ${pastMessages}`,
     });
 
     // Get AI response
     const response = await llm.invoke(formattedPrompt);
 
-    // Save new interaction to memory
-    await memory.saveContext({ input: message.content }, { output: response });
+    // Save the conversation in ChromaDB
+    await vectorStore.addDocuments([
+      { pageContent: `${message.author.username}: ${message.content}`, metadata: { user: message.author.id } },
+      { pageContent: `DM: ${response}`, metadata: { user: "DM" } },
+    ]);
 
     message.reply(response);
   } catch (error) {
