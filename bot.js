@@ -12,10 +12,10 @@ const llm = new ChatOpenAI({
   openAIApiKey: process.env.OPENAI_API_KEY,
   modelName: "gpt-4-turbo",
   maxTokens: 1000,
-  temperature: 0.2,
+  temperature: 0.0,
 });
 
-const ALLOWED_CHANNEL_ID = "1345015106957869110"; // Replace with your desired channel ID
+const ALLOWED_CHANNEL_ID = process.env.ALLOWED_CHANNEL_ID; // Replace with your desired channel ID
 
 // Global shared memory for all players in the same campaign
 const memory = new BufferMemory({
